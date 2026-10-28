@@ -32,4 +32,7 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({ message: err.expose ? err.message : 'Lỗi máy chủ, vui lòng thử lại' });
 });
 
-app.listen(PORT, () => console.log(`LUXE API đang chạy ở cổng ${PORT}`));
+require('./schema')
+  .ensureSchema()
+  .catch((err) => console.error('[schema] Không tạo được bảng bổ sung:', err.message))
+  .finally(() => app.listen(PORT, () => console.log(`LUXE API đang chạy ở cổng ${PORT}`)));
