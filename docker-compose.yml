@@ -1,0 +1,124 @@
+# docker-compose.yml
+# Orchestrate toàn bộ stack LUXE: MySQL + Backend (Express) + Frontend (React/Vite + Nginx)
+# Mô hình 2 repo: file này nằm trong repo luxe_backend, repo luxe_frontend clone cạnh bên:
+#   ~/luxe2/
+#     ├── luxe_backend/    <- chạy docker compose ở đây (.env cũng đặt ở đây)
+#     └── luxe_frontend/
+
+# Mọi secret/mật khẩu đọc từ file .env cùng thư mục (copy từ .env.example). KHÔNG commit .env.
+#
+#   docker compose up -d --build      # build + chạy toàn bộ
+#   docker compose ps                 # xem trạng thái
+#   docker compose logs -f backend    # xem log backend
+
+# Cố định tên project => tên volume luôn là luxe_mysql_data dù thư mục tên gì
+name: luxe
+
+services:
+  # ==========================================
+  #  MySQL 8 — database
+  # ==========================================
+  mysql:
+    image: mysql:8.0
+    container_name: luxe-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-luxe_fashion}
+      MYSQL_USER: ${MYSQL_USER:-luxe_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      TZ: Asia/Ho_Chi_Minh
+    # Tắt performance_schema để tiết kiệm ~200MB RAM (quan trọng với t2/t3.micro 1GB RAM)
+    command:
+      - --performance_schema=OFF
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    # Mở cổng 3306 để kết nối MySQL Workbench từ máy cá nhân.
+    # Security Group chỉ nên cho phép "My IP". Muốn đóng hẳn: MYSQL_BIND=127.0.0.1 trong .env
+    ports:
+      - "${MYSQL_BIND:-0.0.0.0}:${MYSQL_PUBLIC_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # Seed database: các file *.sql trong ./database/init chạy tự động
+      # theo thứ tự tên file, CHỈ ở lần khởi tạo đầu tiên (khi volume mysql_data còn trống).
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - app-network
+    healthcheck:
+      # Dùng 127.0.0.1 (TCP) thay vì localhost (socket) để chờ MySQL khởi tạo xong hẳn
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+
+  # ==========================================
+  #  Backend — Node.js + Express (cổng 5000)
+  # ==========================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: luxe-backend
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      # Kết nối MySQL: host là tên service "mysql" trong network Docker, KHÔNG phải localhost
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USERNAME: ${MYSQL_USER:-luxe_user}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      DB_NAME: ${MYSQL_DATABASE:-luxe_fashion}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost}
+      # Gửi email OTP quên mật khẩu: ses | smtp | (trống = chỉ ghi log)
+      MAIL_PROVIDER: ${MAIL_PROVIDER:-}
+      MAIL_FROM: ${MAIL_FROM:-LUXE <no-reply@luxe.vn>}
+      AWS_REGION: ${AWS_REGION:-ap-southeast-1}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      OTP_DEBUG: ${OTP_DEBUG:-false}
+    # Chỉ bind 127.0.0.1: trên EC2 vẫn test được bằng `curl http://localhost:5000/api/...`
+    # nhưng Internet không truy cập trực tiếp được — mọi request đi qua Nginx /api/
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-5000}:5000"
+    networks:
+      - app-network
+
+  # ==========================================
+  #  Frontend — React (Vite) build → Nginx serve + reverse proxy /api/
+  # ==========================================
+  frontend:
+    build:
+      context: ../luxe_frontend
+      dockerfile: Dockerfile
+      args:
+        # Vite chỉ đọc biến VITE_* lúc `npm run build` (build-time), nên phải truyền
+        # qua build args. Khai báo ở "environment:" bên dưới KHÔNG có tác dụng với React.
+        # Để trống: frontend gọi /api cùng origin, Nginx proxy sang backend.
+        VITE_API_URL: ${VITE_API_URL:-}
+    container_name: luxe-frontend
+    restart: always
+    depends_on:
+      - backend
+    environment:
+      # Biến runtime cho Nginx (envsubst vào nginx.conf.template), không phải cho React
+      PORT: 80
+      BACKEND_URL: http://backend:5000
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  mysql_data:

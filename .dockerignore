@@ -4,3 +4,8 @@ npm-debug.log
 .env
 .env.local
 test
+.github
+database
+docker-compose.yml
+.env.example
+README.md
